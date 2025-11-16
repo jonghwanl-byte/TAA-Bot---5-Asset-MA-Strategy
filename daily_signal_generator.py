@@ -202,7 +202,7 @@ def get_daily_signals_and_report():
 # --- [5. 메인 실행] ---
 if __name__ == "__main__":
     
-    # 주말 확인 로직 제거
+    # [수정] 주말 확인 로직 제거
         
     try:
         # 1. 리포트 생성
@@ -213,18 +213,29 @@ if __name__ == "__main__":
         print(daily_report)
         print("---------------------")
         
-        # 3. 텔레그램으로 전송
-        if send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_TO, daily_report):
-            print("전송 완료.")
-        else:
-            raise Exception("텔레그램 전송에 실패했습니다. 로그를 확인하세요.")
+        # 3. 텔레그램으로 전송 (정상 리포트)
+        # [수정] 정상 리포트 전송 시에는 Markdown 사용
+        if not send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_TO, daily_report):
+            raise Exception("정상 리포트 텔레그램 전송에 실패했습니다.")
+        
+        print("전송 완료.")
         
     except Exception as e:
         print(f"전략 실행 중 오류가 발생했습니다: {e}", file=sys.stderr)
         
-        # [수정] 텔레그램 'parse entities' 오류 방지
+        # [수정] 텔레그램 'parse entities' 오류 방지를 위해,
+        # 오류 메시지는 Markdown 서식을 '제외'하고 순수 텍스트(Plain Text)로 전송
+        
         kst = pytz.timezone('Asia/Seoul')
-        # 오류 메시지({e})를 고정폭(```)으로 감싸서 특수 문자가 파싱되는 것을 방지
-        error_message = f"🚨 TAA Bot 실행 실패 🚨\n({datetime.now(kst).strftime('%Y-%m-%d %H:%M')})\n\n오류:\n```\n{e}\n```"
-        send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_TO, error_message)
+        error_message = f"🚨 TAA Bot 실행 실패 🚨\n({datetime.now(kst).strftime('%Y-%m-%d %H:%M')})\n\n오류:\n{e}" # ``` 제거
+        
+        # 텔레그램 전송 함수 재정의 (parse_mode 제외)
+        url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_TOKEN}/sendMessage"
+        payload = {'chat_id': TELEGRAM_TO, 'text': error_message}
+        try:
+            requests.post(url, json=payload)
+            print("오류 메시지 텔레그램 전송 완료.")
+        except Exception as tel_e:
+            print(f"오류 메시지 텔레그램 전송조차 실패: {tel_e}", file=sys.stderr)
+
         sys.exit(1)
