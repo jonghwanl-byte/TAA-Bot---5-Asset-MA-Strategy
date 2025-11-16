@@ -210,10 +210,14 @@ if __name__ == "__main__":
         print("---------------------")
         
         # 3. 텔레그램으로 전송 (2개 메시지 순차 전송)
-        success1 = send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_TO, report_summary)
-        # 텔레그램 API 과부하 방지를 위해 1초 대기
-        time.sleep(1) # [수정] 이 코드를 위해 import time 이 필요합니다.
-        success2 = send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_TO, report_detail)
+        
+        # [수정] 메시지 1(요약본)은 Markdown 서식 사용
+        success1 = send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_TO, report_summary, parse_mode='Markdown')
+        
+        time.sleep(1) 
+        
+        # [수정] 메시지 2(상세본)는 Markdown 파싱 오류를 피하기 위해 'None'(일반 텍스트)으로 전송
+        success2 = send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_TO, report_detail, parse_mode='None')
         
         if success1 and success2:
             print("2개 메시지 전송 완료.")
