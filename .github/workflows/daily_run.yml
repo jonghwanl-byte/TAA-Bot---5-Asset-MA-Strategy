@@ -34,19 +34,19 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-
-    # --- 1. MA 전략 실행 및 결과 캡처 (최종 오류 방지 로직) ---
+    
+    # --- 1. MA 전략 실행 및 결과 캡처 (최종 환경 PATH 설정) ---
     - name: 🚀 MA 전략 실행 및 결과 캡처
       id: strategy_output
       env:
-        # Python 스크립트 실행에 필요한 환경 변수
         TEST_MODE: ${{ github.event.inputs.test_mode }}
       run: |
-        # Python 실행 경로에 설치된 라이브러리가 포함되도록 PATH 설정
-        export PYTHONPATH=$(python -c "import site; print(site.getusersitepackages()[0])"):$PYTHONPATH
-        
-        # 🚨 스크립트 실행 및 결과 캡처
-        # stderr(오류)를 stdout으로 리다이렉션하여 캡처합니다.
+        # 🚨 PYTHONPATH 설정: 설치된 라이브러리 경로를 Python이 인식하도록 강제합니다.
+        PYTHON_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0] if site.getsitepackages() else '')")
+        export PYTHONPATH=$PYTHON_PACKAGES:$PYTHONPATH
+        export TEST_MODE=${{ github.event.inputs.test_mode }}
+
+        # 스크립트 실행 (STDERR를 STDOUT으로 리다이렉션하여 오류 캡처)
         REPORT_CONTENT=$(python daily_signal_generator.py 2>&1)
         
         # GITHUB_OUTPUT에 캡처된 내용 할당
