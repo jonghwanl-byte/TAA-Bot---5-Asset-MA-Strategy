@@ -61,10 +61,8 @@ def get_daily_signals_and_report():
     # 총 점수 (0~3점)
     total_scores = (sig_20 + sig_120 + sig_200)
     
-    # [수정된 부분]
-    # .map()은 Series용 함수입니다. DataFrame에는 .applymap()을 사용해야 합니다.
-    # .get()을 사용하여 맵핑되지 않는 값(NaN 등)은 0.0(OFF)으로 처리합니다.
-    scalars = total_scores.applymap(lambda x: SCALAR_MAP.get(x, 0.0))
+    # [수정] applymap 대신 DataFrame.map 사용
+    scalars = total_scores.map(lambda x: SCALAR_MAP.get(x, 0.0))
     
     # '오늘' (어제 마감) / '어제' (그제 마감) 데이터 추출
     today_scalars = scalars.iloc[-1]
@@ -86,11 +84,17 @@ def get_daily_signals_and_report():
     
     yesterday = all_prices_df.index[-1]
     kst = pytz.timezone('Asia/Seoul')
-    yesterday_kst = yesterday.astimezone(kst) # KST로 변환
+    
+    # [수정] tz-naive Timestamp 오류 해결
+    # yfinance가 KST(KS) 시간을 naive로 반환하므로, KST로 localize
+    if yesterday.tzinfo is None:
+        yesterday_kst = kst.localize(yesterday)
+    else:
+        yesterday_kst = yesterday.astimezone(kst) # 이미 tz-aware라면 변환
     
     report = []
     report.append(f"🔔 TAA Bot - 5 Asset MA Strategy")
-    report.append(f"({yesterday_kst.strftime('%Y-%m-%d %A')} 마감 기준)") # KST 기준 날짜/요일
+    report.append(f"({yesterday_kst.strftime('%Y-%m-%d %A')} 마감 기준)")
 
     # [1] 리밸런싱 신호
     if is_rebalancing_needed:
@@ -198,7 +202,7 @@ def get_daily_signals_and_report():
 # --- [5. 메인 실행] ---
 if __name__ == "__main__":
     
-    # [수정] 주말 확인 로직 제거
+    # 주말 확인 로직 제거
         
     try:
         # 1. 리포트 생성
@@ -217,8 +221,10 @@ if __name__ == "__main__":
         
     except Exception as e:
         print(f"전략 실행 중 오류가 발생했습니다: {e}", file=sys.stderr)
-        # 텔레그램으로 오류 메시지 전송 시도
+        
+        # [수정] 텔레그램 'parse entities' 오류 방지
         kst = pytz.timezone('Asia/Seoul')
-        error_message = f"🚨 TAA Bot 실행 실패 🚨\n({datetime.now(kst).strftime('%Y-%m-%d %H:%M')})\n\n오류: {e}"
+        # 오류 메시지({e})를 고정폭(```)으로 감싸서 특수 문자가 파싱되는 것을 방지
+        error_message = f"🚨 TAA Bot 실행 실패 🚨\n({datetime.now(kst).strftime('%Y-%m-%d %H:%M')})\n\n오류:\n```\n{e}\n```"
         send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_TO, error_message)
         sys.exit(1)
