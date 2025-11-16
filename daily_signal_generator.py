@@ -18,7 +18,7 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_TO = os.environ.get('TELEGRAM_TO')
 
 # --- [2. 텔레그램 전송 함수] ---
-def send_telegram_message(token, chat_id, message):
+def send_telegram_message(token, chat_id, message, parse_mode='Markdown'):
     """텔레그램으로 메시지를 전송합니다."""
     if not token or not chat_id:
         print("텔레그램 TOKEN 또는 CHAT_ID가 설정되지 않았습니다. Secrets를 확인하세요.", file=sys.stderr)
@@ -28,11 +28,11 @@ def send_telegram_message(token, chat_id, message):
     payload = {
         'chat_id': chat_id,
         'text': message,
-        'parse_mode': 'Markdown' # 텔레그램 서식(고정폭)을 위해 Markdown 사용
+        'parse_mode': parse_mode
     }
     try:
-        response = requests.post(url, json=payload)
-        response.raise_for_status() # 오류가 있으면 예외 발생
+        response = requests.post(url, json=payload, timeout=10) # 10초 타임아웃
+        response.raise_for_status() 
         print("텔레그램 메시지 전송 성공.")
         return True
     except requests.exceptions.RequestException as e:
@@ -43,7 +43,6 @@ def send_telegram_message(token, chat_id, message):
 def get_daily_signals_and_report():
     
     print("... 최신 시장 데이터 다운로드 중 ...")
-    # MA 계산을 위해 최소 200일 + 200일(버퍼) 데이터 다운로드
     data_full = yf.download(ASSETS, period="400d", progress=False)
     
     if data_full.empty:
@@ -53,18 +52,15 @@ def get_daily_signals_and_report():
     
     # --- [4. MA 및 신호 계산 (Hysteresis 없음)] ---
     
-    # 각 MA별 신호 (1=ON, 0=OFF)
     sig_20 = (all_prices_df > all_prices_df.rolling(window=20).mean()).astype(int)
     sig_120 = (all_prices_df > all_prices_df.rolling(window=120).mean()).astype(int)
     sig_200 = (all_prices_df > all_prices_df.rolling(window=200).mean()).astype(int)
     
-    # 총 점수 (0~3점)
     total_scores = (sig_20 + sig_120 + sig_200)
     
-    # [수정] applymap 대신 DataFrame.map 사용
+    # DataFrame.map 사용 (applymap 경고 수정)
     scalars = total_scores.map(lambda x: SCALAR_MAP.get(x, 0.0))
     
-    # '오늘' (어제 마감) / '어제' (그제 마감) 데이터 추출
     today_scalars = scalars.iloc[-1]
     yesterday_scalars = scalars.iloc[-2]
     
@@ -85,48 +81,50 @@ def get_daily_signals_and_report():
     yesterday = all_prices_df.index[-1]
     kst = pytz.timezone('Asia/Seoul')
     
-    # [수정] tz-naive Timestamp 오류 해결
-    # yfinance가 KST(KS) 시간을 naive로 반환하므로, KST로 localize
+    # tz-naive Timestamp 오류 해결
     if yesterday.tzinfo is None:
         yesterday_kst = kst.localize(yesterday)
     else:
-        yesterday_kst = yesterday.astimezone(kst) # 이미 tz-aware라면 변환
+        yesterday_kst = yesterday.astimezone(kst)
     
-    report = []
-    report.append(f"🔔 TAA Bot - 5 Asset MA Strategy")
-    report.append(f"({yesterday_kst.strftime('%Y-%m-%d %A')} 마감 기준)")
+    # [수정] 메시지를 2개로 분할
+    
+    # --- [메시지 1: 핵심 요약] ---
+    report_summary = []
+    report_summary.append(f"🔔 TAA Bot - 5 Asset MA Strategy")
+    report_summary.append(f"({yesterday_kst.strftime('%Y-%m-%d %A')} 마감 기준)")
 
     # [1] 리밸런싱 신호
     if is_rebalancing_needed:
-        report.append("\n" + "🔼 ====================== 🔼")
-        report.append("    리밸런싱 신호: \"매매 필요\"")
-        report.append("🔼 ====================== 🔼")
-        report.append("(MA 신호 변경으로 목표 비중이 어제와 다릅니다)")
+        report_summary.append("\n" + "🔼 ====================== 🔼")
+        report_summary.append("    리밸런싱 신호: \"매매 필요\"")
+        report_summary.append("🔼 ====================== 🔼")
+        report_summary.append("(MA 신호 변경으로 목표 비중이 어제와 다릅니다)")
     else:
-        report.append("\n" + "🟢 ====================== 🟢")
-        report.append("    리밸런싱 신호: \"매매 불필요\"")
-        report.append("🟢 ====================== 🟢")
-        report.append("(모든 MA 신호가 어제와 동일하게 유지되었습니다)")
+        report_summary.append("\n" + "🟢 ====================== 🟢")
+        report_summary.append("    리밸런싱 신호: \"매매 불필요\"")
+        report_summary.append("🟢 ====================== 🟢")
+        report_summary.append("(모든 MA 신호가 어제와 동일하게 유지되었습니다)")
     
-    report.append("\n" + "---")
+    report_summary.append("\n" + "---")
 
     # [2] 오늘 목표 비중
-    report.append("💰 [1] 오늘 목표 비중 (신규)")
+    report_summary.append("💰 [1] 오늘 목표 비중 (신규)")
     
     for ticker in ASSETS:
         emoji = "🎯" if today_weights[ticker] != yesterday_weights[ticker] else "*"
-        report.append(f" {emoji} {ticker}: {today_weights[ticker]:.1%}")
+        report_summary.append(f" {emoji} {ticker}: {today_weights[ticker]:.1%}")
     
     cash_emoji = "🎯" if abs(today_total_cash - yesterday_total_cash) > 0.0001 else "*"
-    report.append(f" {cash_emoji} 현금 (Cash): {today_total_cash:.1%}")
+    report_summary.append(f" {cash_emoji} 현금 (Cash): {today_total_cash:.1%}")
     
-    report.append("\n" + "---")
+    report_summary.append("\n" + "---")
     
     # [3] 비중 변경 상세 (Monospace)
-    report.append("📊 [2] 비중 변경 상세 (매매 신호)")
-    report.append("```") # Monospace 시작
-    report.append("자산        (어제)   (오늘)  | (변경폭)")
-    report.append("---------------------------------------")
+    report_summary.append("📊 [2] 비중 변경 상세 (매매 신호)")
+    report_summary.append("```") # Monospace 시작
+    report_summary.append("자산        (어제)   (오늘)  | (변경폭)")
+    report_summary.append("---------------------------------------")
 
     def format_change_row(ticker, yesterday, today):
         delta = today - yesterday
@@ -144,39 +142,40 @@ def get_daily_signals_and_report():
         return f"{ticker_str}: {yesterday_str} -> {today_str} | {change_str}"
 
     for ticker in ASSETS:
-        report.append(format_change_row(ticker, yesterday_weights[ticker], today_weights[ticker]))
+        report_summary.append(format_change_row(ticker, yesterday_weights[ticker], today_weights[ticker]))
     
-    report.append(format_change_row('현금', yesterday_total_cash, today_total_cash))
-    report.append("---------------------------------------")
-    report.append("```") # Monospace 끝
+    report_summary.append(format_change_row('현금', yesterday_total_cash, today_total_cash))
+    report_summary.append("---------------------------------------")
+    report_summary.append("```") # Monospace 끝
     
-    report.append("\n" + "---")
+    # --- [메시지 2: 상세 정보] ---
+    report_detail = []
+    report_detail.append(f"--- (상세 정보: {yesterday_kst.strftime('%Y-%m-%d')}) ---")
     
-    # [4. 전일 시장 현황]
-    report.append("📈 [3] 전일 시장 현황")
+    # [4] 전일 시장 현황
+    report_detail.append("\n" + "📈 [3] 전일 시장 현황")
     
     def format_price_line(ticker_name, price, change):
         emoji = "🔴" if change >= 0 else "🔵"
         return f"{emoji} {ticker_name}: {price:.1f} ({change:+.1%})"
         
     for ticker in ASSETS:
-        report.append(f"{format_price_line(ticker, today_prices[ticker], price_change[ticker])}")
+        report_detail.append(f"{format_price_line(ticker, today_prices[ticker], price_change[ticker])}")
     
-    report.append("\n" + "---")
+    report_detail.append("\n" + "---")
     
     # [5] MA 신호 상세
-    report.append("🔍 [4] MA 신호 상세 (오늘 기준)")
-    report.append(f"(단순 돌파 룰 적용)")
+    report_detail.append("🔍 [4] MA 신호 상세 (오늘 기준)")
+    report_detail.append(f"(단순 돌파 룰 적용)")
     
     for ticker in ASSETS:
         score = total_scores[ticker].iloc[-1]
         status_emoji = "🟢ON" if score > 0 else "🔴OFF"
         
-        report.append(f"\n**{ticker} (신호: {score}/3개 {status_emoji})**")
+        report_detail.append(f"\n**{ticker} (신호: {score}/3개 {status_emoji})**")
         
-        # 20, 120, 200일선 신호 상세
         for window in MA_WINDOWS:
-            sig_df = locals()[f'sig_{window}'] # sig_20, sig_120, sig_200
+            sig_df = locals()[f'sig_{window}']
             
             today_state_val = sig_df[ticker].iloc[-1]
             yesterday_state_val = sig_df[ticker].iloc[-2]
@@ -189,53 +188,49 @@ def get_daily_signals_and_report():
             
             t_price = today_prices[ticker]
             ma_val = all_prices_df[ticker].rolling(window=window).mean().iloc[-1]
-            # MA 계산이 안되는 초기 구간(NaN) 방지
+            
             if pd.isna(ma_val):
                 disparity = 0.0
             else:
                 disparity = (t_price / ma_val) - 1.0
             
-            report.append(f"* {window}일: {state_emoji} (이격도: {disparity:+.1%}) {state_change}")
+            report_detail.append(f"* {window}일: {state_emoji} (이격도: {disparity:+.1%}) {state_change}")
     
-    return "\n".join(report)
+    # [수정] 2개의 리포트를 반환
+    return "\n".join(report_summary), "\n".join(report_detail)
 
 # --- [5. 메인 실행] ---
 if __name__ == "__main__":
-    
-    # [수정] 주말 확인 로직 제거
         
     try:
-        # 1. 리포트 생성
-        daily_report = get_daily_signals_and_report()
+        # 1. 리포트 생성 (2개로 분할)
+        report_summary, report_detail = get_daily_signals_and_report()
         
         # 2. 터미널에 출력 (GitHub Actions 로그용)
-        print("--- [생성된 리포트] ---")
-        print(daily_report)
+        print("--- [생성된 리포트 1] ---")
+        print(report_summary)
+        print("--- [생성된 리포트 2] ---")
+        print(report_detail)
         print("---------------------")
         
-        # 3. 텔레그램으로 전송 (정상 리포트)
-        # [수정] 정상 리포트 전송 시에는 Markdown 사용
-        if not send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_TO, daily_report):
-            raise Exception("정상 리포트 텔레그램 전송에 실패했습니다.")
+        # 3. 텔레그램으로 전송 (2개 메시지 순차 전송)
+        success1 = send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_TO, report_summary)
+        # 텔레그램 API 과부하 방지를 위해 1초 대기
+        time.sleep(1) 
+        success2 = send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_TO, report_detail)
         
-        print("전송 완료.")
+        if success1 and success2:
+            print("2개 메시지 전송 완료.")
+        else:
+            raise Exception("텔레그램 전송에 실패했습니다. 로그를 확인하세요.")
         
     except Exception as e:
         print(f"전략 실행 중 오류가 발생했습니다: {e}", file=sys.stderr)
         
-        # [수정] 텔레그램 'parse entities' 오류 방지를 위해,
-        # 오류 메시지는 Markdown 서식을 '제외'하고 순수 텍스트(Plain Text)로 전송
-        
+        # [수정] 텔레그램 'parse entities' 오류 방지
         kst = pytz.timezone('Asia/Seoul')
-        error_message = f"🚨 TAA Bot 실행 실패 🚨\n({datetime.now(kst).strftime('%Y-%m-%d %H:%M')})\n\n오류:\n{e}" # ``` 제거
+        error_message = f"🚨 TAA Bot 실행 실패 🚨\n({datetime.now(kst).strftime('%Y-%m-%d %H:%M')})\n\n오류:\n{e}"
         
-        # 텔레그램 전송 함수 재정의 (parse_mode 제외)
-        url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_TOKEN}/sendMessage"
-        payload = {'chat_id': TELEGRAM_TO, 'text': error_message}
-        try:
-            requests.post(url, json=payload)
-            print("오류 메시지 텔레그램 전송 완료.")
-        except Exception as tel_e:
-            print(f"오류 메시지 텔레그램 전송조차 실패: {tel_e}", file=sys.stderr)
-
+        # 오류 메시지는 Markdown 서식을 '제외'하고 순수 텍스트(Plain Text)로 전송
+        send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_TO, error_message, parse_mode='None')
         sys.exit(1)
