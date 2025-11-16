@@ -5,7 +5,7 @@ on:
     # 매일 23:00 UTC에 실행 (한국 시간 KST = UTC + 9, 즉 오전 8시)
     - cron: '0 23 * * *'
     
-  workflow_dispatch:
+  workflow_dispatch: # Actions 탭에 수동 실행 버튼을 표시하는 트리거
     inputs:
       test_mode:
         description: 'Enable Test Mode (Bypasses weekend check, runs on latest data).'
@@ -13,29 +13,45 @@ on:
         default: 'FALSE'
         type: choice
         options:
-          - 'TRUE'
-          - 'FALSE'
+        - 'TRUE'
+        - 'FALSE'
 
 jobs:
   run_daily_strategy:
     runs-on: ubuntu-latest
     
     steps:
-      - name: 📦 코드 체크아웃
-        uses: actions/checkout@v3
+    - name: 📦 코드 체크아웃
+      uses: actions/checkout@v3
 
-      - name: 🐍 Python 환경 설정
-        uses: actions/setup-python@v3
-        with:
-          python-version: '3.x'
+    - name: 🐍 Python 환경 설정
+      uses: actions/setup-python@v3
+      with:
+        python-version: '3.x'
 
-      - name: ⚙️ 종속성 설치 (requirements.txt)
-        run: pip install -r requirements.txt
+    - name: ⚙️ 종속성 설치 (requirements.txt)
+      run: pip install -r requirements.txt
+    
+    # --- 1. MA 전략 실행 및 결과 캡처 ---
+    - name: 🚀 MA 전략 실행 및 결과 캡처
+      id: strategy_output
+      env:
+        TEST_MODE: ${{ github.event.inputs.test_mode }}
+      run: |
+        # Python 스크립트 실행 결과를 GITHUB_OUTPUT으로 캡처
+        # $GITHUB_OUTPUT 변수를 사용하여 보고서 내용을 캡처합니다.
+        echo "report<<EOF" >> $GITHUB_OUTPUT
+        python daily_signal_generator.py >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: 🚀 MA 전략 실행 및 텔레그램 발송 (TEST MODE: ${{ github.event.inputs.test_mode }})
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TEST_MODE: ${{ github.event.inputs.test_mode }}
-        run: python daily_signal_generator.py
-
+    # --- 2. 텔레그램 메시지 전송 ---
+    - name: 📩 텔레그램 메시지 전송
+      uses: appleboy/telegram-action@master
+      with:
+        # secrets에 설정된 토큰과 채팅 ID 사용
+        to: ${{ secrets.TELEGRAM_CHAT_ID }} 
+        token: ${{ secrets.TELEGRAM_TOKEN }}
+        # 캡처된 보고서 내용 전송
+        message: ${{ steps.strategy_output.outputs.report }}
+        parse_mode: markdown 
+      if: always() # 스크립트가 오류를 내도 메시지를 보내도록 설정
