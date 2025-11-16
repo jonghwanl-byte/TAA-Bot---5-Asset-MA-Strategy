@@ -4,7 +4,8 @@ on:
   schedule:
     # 매일 23:00 UTC에 실행 (한국 시간 KST = UTC + 9, 즉 오전 8시)
     - cron: '0 23 * * *'
-  workflow_dispatch: # Actions 탭에서 수동 실행 허용
+    
+  workflow_dispatch: # ★★★ Actions 탭에 수동 실행 버튼을 표시하는 핵심 트리거 ★★★
     inputs:
       test_mode:
         description: 'Enable Test Mode (Bypasses weekend check, runs on latest data).'
