@@ -32,11 +32,26 @@ jobs:
     - name: ⚙️ 종속성 설치 (requirements.txt)
       run: pip install -r requirements.txt
 
-    - name: 🚀 MA 전략 실행 및 텔레그램 발송 (TEST MODE: ${{ github.event.inputs.test_mode }})
-      env:
-        # L35: 8칸 공백
-        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }} 
-        # L36: 8칸 공백 (이전 오류 발생 위치)
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        TEST_MODE: ${{ github.event.inputs.test_mode }}
-      run: python daily_signal_generator.py
+    # --- 1. MA 전략 실행 및 결과 캡처 (변수 통합) ---
+    - name: 🚀 MA 전략 실행 및 결과 캡처
+      id: strategy_output
+      run: |
+        # Python 스크립트 실행 환경 변수를 여기서 직접 설정 (YAML 오류 회피)
+        export TEST_MODE=${{ github.event.inputs.test_mode }}
+        export TELEGRAM_TOKEN=${{ secrets.TELEGRAM_TOKEN }}
+        export TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
+        
+        # Python 스크립트 실행 결과를 GITHUB_OUTPUT으로 캡처
+        echo "report<<EOF" >> $GITHUB_OUTPUT
+        python daily_signal_generator.py >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    # --- 2. 텔레그램 메시지 전송 ---
+    - name: 📩 텔레그램 메시지 전송
+      uses: appleboy/telegram-action@master
+      with:
+        to: ${{ secrets.TELEGRAM_CHAT_ID }} 
+        token: ${{ secrets.TELEGRAM_TOKEN }}
+        message: ${{ steps.strategy_output.outputs.report }}
+        format: markdown 
+      if: always()
