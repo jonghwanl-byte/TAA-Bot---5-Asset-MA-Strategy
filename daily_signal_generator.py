@@ -117,7 +117,7 @@ def send_telegram_message(message):
         print(f"\n[Report Content Preview]\n{message}")
         return
 
-    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         'chat_id': TELEGRAM_CHAT_ID,
         'text': message,
@@ -134,6 +134,18 @@ def get_target_date():
     """Determines the base date for data analysis."""
     today = datetime.date.today()
     
+    # ★★★ TEST_MODE 로직: 환경 변수가 TRUE면 주말 체크를 무시함 ★★★
+    if os.environ.get('TEST_MODE') == 'TRUE':
+        # 테스트 모드에서는 지난 금요일(가장 최근의 유효 데이터)을 기준으로 분석 시도
+        if today.weekday() in [5, 6]:
+            days_to_subtract = today.weekday() - 4
+            test_date = today - datetime.timedelta(days=days_to_subtract)
+            print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] TEST MODE ON: Forcing analysis based on {test_date.strftime('%Y-%m-%d')}")
+            return test_date
+        # 주중 테스트 실행 시 어제 날짜 사용
+        return today - datetime.timedelta(days=1)
+
+
     if today.weekday() == 0:  # Monday (0) -> Use last Friday's closing price
         return today - datetime.timedelta(days=3)
     elif today.weekday() in [5, 6]:  # Saturday (5), Sunday (6) -> Do not send
