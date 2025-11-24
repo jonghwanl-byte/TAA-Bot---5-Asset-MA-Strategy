@@ -1,12 +1,3 @@
-2.  **메시지 통합:** 요약본과 상세본을 나누지 않고 **하나의 긴 메시지**로 합쳐서 한 번에 전송합니다.
-
-아래 코드로 `daily_signal_generator.py` 파일을 덮어쓰시면 됩니다.
-
----
-
-### 📄 `daily_signal_generator.py` (수정본)
-
-```python
 import yfinance as yf
 import numpy as np
 import pandas as pd
