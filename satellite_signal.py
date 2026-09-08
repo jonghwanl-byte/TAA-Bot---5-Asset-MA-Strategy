@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-TAA Satellite 시그널 — 국내 상장 8자산 동적 배분
+TAA Satellite 시그널 — 국내 상장 ETF 동적 배분
 
 코어(QQQ / TLT / GLD)와 별도 계좌로 독립 운용하는 위성 포트폴리오.
 상태 판정 규칙은 코어와 완전히 동일하고, 유니버스와 비중만 다르다.
@@ -15,29 +15,38 @@ TAA Satellite 시그널 — 국내 상장 8자산 동적 배분
 
 [포지션 비중] ON 개수로 자산별 기본 비중을 스케일링
   3개 -> 100%   2개 -> 75%   1개 -> 50%   0개 -> 0%
-  기본 비중은 전 자산 20% 동일 -> 20% / 15% / 10% / 0%
+  기본 비중 BASE_WEIGHT 에 위 배율을 곱한다.
 
-  자산별 상한 20%만 적용하고 총합 상한은 두지 않는다. 각 자산은 다른
+  자산별 상한만 적용하고 총합 상한은 두지 않는다. 각 자산은 다른
   자산의 상태와 무관하게 자기 점수로만 비중이 정해지므로, 유니버스에
   종목을 추가해도 규칙이 그대로다. 다만 다수가 동시에 ON이면 합계가
   100%를 넘을 수 있어 리포트에 초과분과 환산 비중을 함께 표시한다.
 
 [주의] 히스테리시스는 경로 의존적이다. 짧은 기간만 받으면 상태가 0에서
   출발해 실제와 다른 신호가 나오고, 매일 시작점이 밀려 어제와 오늘의
-  결과가 뒤집힌다. LOOKBACK 은 반드시 충분히 길게 유지할 것.
+  결과가 뒤집힌다. 조회 기간은 반드시 충분히 길게 유지할 것.
 
 [집행] 당일 종가로 산출하고 다음 거래일에 집행한다(lag = 1).
+
+[데이터 소스] 2025-12-27 KRX 정보데이터시스템이 회원제로 전환되어
+  pykrx 의 ETF 전용 엔드포인트는 KRX_ID/KRX_PW 없이는 동작하지 않는다.
+  일반 시세 엔드포인트(get_market_ohlcv_by_date)는 인증 없이 살아 있어
+  이쪽을 1순위로 쓴다. 단 응답이 3000행에서 잘리므로 기간을 나눠 받는다.
 
 환경변수:
   TELEGRAM_BOT_TOKEN  (필수, 구 TELEGRAM_TOKEN 도 인식)
   TELEGRAM_CHAT_ID    (필수, 구 TELEGRAM_TO 도 인식)
   PORTFOLIO_VALUE     (선택) 평가액(KRW). 지정 시 목표 수량(주)까지 계산
   ALWAYS_SEND         (선택) "false"면 비중 변동이 있을 때만 전송. 기본 true
+  PRICE_SOURCE        (선택) 소스 순서. 기본 "pykrx,naver,history,download"
+  KRX_ID / KRX_PW     (선택) 있으면 pykrx ETF 엔드포인트도 사용
 """
 
+import io
 import os
 import sys
 import time
+import contextlib
 from datetime import datetime, timezone, timedelta
 
 import pandas as pd
@@ -67,14 +76,15 @@ SCALAR_MAP = {3: 1.00, 2: 0.75, 1: 0.50, 0: 0.00}
 LOOKBACK = "max"        # 히스테리시스 상태 수렴을 위해 전체 히스토리 사용
 DEFAULT_START = "2005-01-01"   # period="max" 가 무시될 때 쓰는 명시적 시작일
 KRX_START = "20050101"         # pykrx 조회 시작일
+KRX_CHUNK_YEARS = 6            # 3000행 응답 제한 회피용 분할 단위
 
 # 가격 소스 우선순위. 국내 상장 종목은 KRX 원본(pykrx)이 1순위.
-# PRICE_SOURCE=history,download 처럼 환경변수로 덮어쓸 수 있다.
+# PRICE_SOURCE=naver,history 처럼 환경변수로 덮어쓸 수 있다.
 #
 # 주의: os.environ.get(key, default) 는 키가 '빈 문자열'로 존재하면 default 를
 # 쓰지 않는다. GitHub Actions 에서 미설정 vars 는 빈 문자열로 주입되므로
 # 반드시 `or` 로 한 번 더 걸러야 한다.
-DEFAULT_SOURCES = "pykrx,history,download"
+DEFAULT_SOURCES = "pykrx,naver,history,download"
 WARMUP_EXTRA = 250      # 최소 요구 길이 = max(MA) + 이 값. 신규 상장 종목은 제외됨
 RETRIES = 4
 FETCH_GAP = 0.7         # 종목 간 요청 간격(초). Yahoo 레이트리밋 회피
@@ -93,6 +103,9 @@ def env(key: str, default: str = "") -> str:
     return (os.environ.get(key) or default).strip()
 
 
+HAS_KRX_AUTH = bool(env("KRX_ID") and env("KRX_PW"))
+
+
 def esc(s) -> str:
     """텔레그램 HTML 파싱 오류 방지."""
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -103,7 +116,7 @@ def fmt(v: float) -> str:
 
 
 def pct(w: float) -> str:
-    """20% / 15% / 10% 는 정수, 환산 비중처럼 소수가 나오면 소수 1자리."""
+    """정수로 떨어지면 정수, 아니면 소수 1자리."""
     return f"{w:.0%}" if abs(w * 100 - round(w * 100)) < 1e-9 else f"{w:.1%}"
 
 
@@ -128,31 +141,95 @@ def _clean(s) -> pd.Series | None:
     return s.sort_index()
 
 
+def _krx_windows(start: str, end: str):
+    """[start, end] 를 KRX_CHUNK_YEARS 단위로 잘라 (from, to) 목록 생성.
+
+    pykrx 응답이 3000행에서 잘리므로(약 12년) 한 번에 받으면 오래된
+    구간이 조용히 사라진다. 6년 단위로 나누면 각 구간이 1500행 안쪽이다.
+    """
+    s = datetime.strptime(start, "%Y%m%d")
+    e = datetime.strptime(end, "%Y%m%d")
+    out = []
+    while s <= e:
+        nxt = min(s.replace(year=s.year + KRX_CHUNK_YEARS), e)
+        out.append((s.strftime("%Y%m%d"), nxt.strftime("%Y%m%d")))
+        if nxt >= e:
+            break
+        s = nxt + timedelta(days=1)
+    return out
+
+
 def _via_pykrx(ticker: str):
     """KRX 원본 데이터 경로. 국내 상장 종목의 1순위 소스.
 
     Yahoo 가 .KS 종목에 대해 잘린 히스토리(약 1개월)를 돌려주는 사례가 있어,
     KRX 에서 직접 받는 경로를 먼저 시도한다.
+
+    KRX 회원제 전환 이후 ETF 전용 엔드포인트는 인증이 필요하므로,
+    KRX_ID/KRX_PW 가 없으면 일반 시세 엔드포인트만 쓴다.
     """
     from pykrx import stock                              # 지연 임포트
 
     code = ticker.split(".")[0]
     today = datetime.now(KST).strftime("%Y%m%d")
 
-    df = None
-    for getter in (stock.get_etf_ohlcv_by_date, stock.get_market_ohlcv_by_date):
-        try:
-            df = getter(KRX_START, today, code)
-        except Exception:                                # noqa: BLE001
-            df = None
-        if df is not None and len(df) and "종가" in df.columns:
-            break
-        df = None
+    getters = [stock.get_market_ohlcv_by_date]
+    if HAS_KRX_AUTH:
+        getters.insert(0, stock.get_etf_ohlcv_by_date)
 
-    if df is None:
+    for getter in getters:
+        frames = []
+        for f, t in _krx_windows(KRX_START, today):
+            try:
+                # pykrx 는 내부 오류를 stdout 으로 직접 출력한다. 로그를 삼킨다.
+                with contextlib.redirect_stdout(io.StringIO()):
+                    df = getter(f, t, code)
+            except Exception:                            # noqa: BLE001
+                continue
+            if df is not None and len(df) and "종가" in df.columns:
+                frames.append(df)
+
+        if not frames:
+            continue
+
+        df = pd.concat(frames)
+        df.index = pd.to_datetime(df.index)
+        df = df[~df.index.duplicated(keep="last")].sort_index()
+        s = _clean(df["종가"])
+        if s is not None and len(s):
+            return s[s > 0]                              # 휴장일 0 제거
+
+    return None
+
+
+def _via_naver(ticker: str):
+    """네이버 금융 siseJson. 로그인 불필요한 국내 시세 경로."""
+    import json
+    import re
+
+    code = ticker.split(".")[0]
+    today = datetime.now(KST).strftime("%Y%m%d")
+    url = (
+        "https://api.finance.naver.com/siseJson.naver"
+        f"?symbol={code}&requestType=1"
+        f"&startTime={KRX_START}&endTime={today}&timeframe=day"
+    )
+    r = requests.get(url, timeout=30, headers={
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://finance.naver.com/",
+    })
+    r.raise_for_status()
+
+    # 응답이 JS 리터럴(작은따옴표, 트레일링 콤마) 형태라 정규화가 필요하다.
+    txt = re.sub(r",\s*]", "]", r.text.strip().replace("'", '"'))
+    rows = json.loads(txt)
+    if len(rows) < 2:
         return None
+
+    df = pd.DataFrame(rows[1:], columns=rows[0])
+    df.index = pd.to_datetime(df["날짜"].astype(str), format="%Y%m%d")
     s = _clean(df["종가"])
-    return s[s > 0] if s is not None else None           # 휴장일 0 제거
+    return s[s > 0] if s is not None else None
 
 
 def _via_history(ticker: str):
@@ -184,6 +261,7 @@ def _via_download(ticker: str):
 
 SOURCE_FNS = {
     "pykrx": _via_pykrx,
+    "naver": _via_naver,
     "history": _via_history,
     "download": _via_download,
 }
@@ -207,22 +285,20 @@ def resolve_sources() -> list:
 
 
 SOURCES = resolve_sources()
+NEED = max(MA_PERIODS) + WARMUP_EXTRA
 
 
 def fetch_one(ticker: str):
-    """(Series, 오류메시지) 반환.
+    """(Series, 채택소스, 오류메시지) 반환.
 
     PRICE_SOURCE 순서대로 시도하고 가장 긴 히스토리를 채택한다. 충분한
     길이를 확보하면 남은 경로는 건너뛴다. 한 종목의 실패가 다른 종목을
     오염시키지 않도록 반드시 종목별로 요청한다.
     """
-    need = max(MA_PERIODS) + WARMUP_EXTRA
     best, best_src, errs = None, None, []
 
     for label in SOURCES:
-        fn = SOURCE_FNS.get(label)
-        if fn is None:
-            continue
+        fn = SOURCE_FNS[label]
 
         for attempt in range(1, RETRIES + 1):
             try:
@@ -231,7 +307,7 @@ def fetch_one(ticker: str):
                     print(f"  {ticker} [{label}] 빈 응답")
                 else:
                     print(f"  {ticker} [{label}] {len(s)}일"
-                          f"{'' if len(s) >= need else ' — 부족'}")
+                          f"{'' if len(s) >= NEED else ' — 부족'}")
                     if best is None or len(s) > len(best):
                         best, best_src = s, label
                 break
@@ -250,7 +326,7 @@ def fetch_one(ticker: str):
                           f"{attempt}/{RETRIES - 1}", file=sys.stderr)
                     time.sleep(wait)
 
-        if best is not None and len(best) >= need:
+        if best is not None and len(best) >= NEED:
             break                                       # 충분하면 다음 경로 생략
 
     if best is None:
@@ -261,8 +337,9 @@ def fetch_one(ticker: str):
 def fetch_prices():
     """{ticker: Series}, {ticker: 오류메시지} 반환."""
     out, errs = {}, {}
+    auth = "KRX 인증 있음" if HAS_KRX_AUTH else "KRX 인증 없음 — 일반 시세 사용"
     print(f"yfinance {getattr(yf, '__version__', '?')} | 소스 순서 {SOURCES} "
-          f"| {len(TICKERS)}종목")
+          f"| {len(TICKERS)}종목 | {auth}")
 
     for ticker in TICKERS:
         s, src, err = fetch_one(ticker)
@@ -286,9 +363,8 @@ def compute_states(close: pd.Series):
         price < ma * BAND_DN  -> OFF
         그 외                 -> 유지
     """
-    need = max(MA_PERIODS) + WARMUP_EXTRA     # 히스테리시스 워밍업 여유
-    if len(close) < need:
-        return None, f"데이터 부족 ({len(close)}일 / 최소 {need}일)"
+    if len(close) < NEED:
+        return None, f"데이터 부족 ({len(close)}일 / 최소 {NEED}일)"
 
     mas = {n: close.rolling(n).mean() for n in MA_PERIODS}
     state = {n: 0 for n in MA_PERIODS}
@@ -407,7 +483,8 @@ def build_report():
             f"{mark} <b>현금</b>  {pct(max(y_cash, 0))} → <b>{pct(max(t_cash, 0))}</b>"
         )
 
-    lines = ["<b>🛰 TAA Satellite — 국내 8자산</b>", f"<i>{now} KST</i>"]
+    ma_label = "/".join(str(n) for n in MA_PERIODS)
+    lines = [f"<b>🛰 TAA Satellite — 국내 {len(TICKERS)}자산</b>", f"<i>{now} KST</i>"]
     if base_date is not None:
         lines.append(f"<i>기준: {base_date.strftime('%Y-%m-%d')} 마감 · 익일 집행</i>")
     lines.append("")
@@ -420,7 +497,7 @@ def build_report():
     lines.append("")
 
     lines.append("<b>■ 목표 비중</b>")
-    lines.append("<i>● = 20/120/200일선 ON · 자산별 상한 20%</i>")
+    lines.append(f"<i>● = {ma_label}일선 ON · 자산별 상한 {pct(BASE_WEIGHT)}</i>")
     lines += rows
 
     if rows:
@@ -441,7 +518,10 @@ def build_report():
             lines.append(entry)
 
     if failed:
-        lines += ["", "<b>⚠️ 처리 실패</b>"] + [f"· {esc(f)}" for f in failed]
+        lines += ["", "<b>⚠️ 처리 실패 — 아래 비중은 불완전</b>"]
+        lines += [f"· {esc(f)}" for f in failed]
+        lines.append("<i>실패 자산은 0%가 아니라 '판정 불가'입니다. "
+                     "현금 비중 증가로 읽지 마세요.</i>")
         lines.append(f"<i>yfinance {esc(getattr(yf, '__version__', '?'))}</i>")
     if warns:
         lines += ["", "<b>⚠️ 경고</b>"] + [f"· {esc(w)}" for w in warns]
